@@ -49,7 +49,7 @@ function _M.new(zone, rate, circuit_breaker_dict_name, redis_cfg)
     end
 
     if redis_cfg['timeout'] == nil then
-        redis_cfg['timeout'] = 200
+        redis_cfg['timeout'] = 1000
     end
 
     if redis_cfg['dbid'] == nil then
@@ -82,7 +82,7 @@ end
 
 
 local function redis_create(host, port, timeout_millis, dbid)
-    timeout_millis = timeout_millis or 200
+    timeout_millis = timeout_millis or 1000
     host = host or "127.0.0.1"
     port = port or 6379
 
@@ -158,7 +158,7 @@ local function get_start_of_period(scale,requesttime)
     return seconds
 end
 
-local function expire(key,scale,rd_host,rd_port,timeout,rd_dbid)
+local function expire(premature, key,scale,rd_host,rd_port,timeout,rd_dbid)
     local not_expired = true
     local expire_tries = 0
     local last_err = nil
@@ -166,8 +166,8 @@ local function expire(key,scale,rd_host,rd_port,timeout,rd_dbid)
         expire_tries=expire_tries+1
         local red_exp, last_err = redis_create(rd_host,rd_port,
                                             1000,rd_dbid)
-        if red_exp then
-            local res, last_err = red_exp:expire(curr,scale*2)
+        if red_exp ~= nil then
+            local res, last_err = red_exp:expire(key,scale*10)
             if not err then
                 not_expired = false
                 local ok, err = red_exp:set_keepalive(10000, 1000)
@@ -204,38 +204,36 @@ local function increment_limit(premature,rd_host,rd_port,rd_timeout,rd_dbid,dict
     local start_of_period = get_start_of_period(scale,requesttime)
     local curr, old = get_keys(scale,key,start_of_period)
 
-    local new_count, err = red:incr(curr)
-    ngx.log(ngx.CRIT,new_count,err)
-    if new_count ~= nil then
+    red:init_pipeline(n)
+    red:incr(curr)
+    red:get(old)
+    local results, err = red:commit_pipeline()
+
+    if results ~= nil then
+        local new_count = results[1]
         if new_count == 1 then
-            --expire(curr,scale,rd_host,rd_port,10,rd_dbid)
+            ngx.timer.at(0, expire,curr,scale,rd_host,rd_port,rd_timeout,rd_dbid)
         else
-            local res, err = red:get(old)
-            if not err then
-                local old_number_of_requests = 0
-                if res ~= null then
-                    old_number_of_requests = res
-                end
-                local elapsed = requesttime - start_of_period
-                local current_rate = old_number_of_requests * ( (scale - elapsed) / scale) + new_count
+            local res = results[2]
 
-                ngx.log(ngx.CRIT,current_rate .. ':' .. rate .. ':' .. old_number_of_requests .. ':' .. new_count)
-                if current_rate > rate then
-                    ngx.log(ngx.CRIT,'open circuit')
-                    open_circuit(dict_name,key,start_of_period+scale)
-                end
+            local old_number_of_requests = 0
+            if res ~= null then
+                old_number_of_requests = res
+            end
+            local elapsed = requesttime - start_of_period
+            local current_rate = old_number_of_requests * ( (scale - elapsed) / scale) + new_count
 
-                -- put it into the connection pool of size 100,
-                -- with 10 seconds max idle time
-                local ok, err = red:set_keepalive(10000, 1000)
-                if not ok then
-                    ngx.log(ngx.WARN, "failed to set keepalive: ", err)
-                end
-            else
-                ok, err = red:close()
-                if not ok then
-                    ngx.log(ngx.WARN,"failed to close redis connection")
-                end
+            ngx.log(ngx.CRIT,current_rate .. ':' .. rate .. ':' .. old_number_of_requests .. ':' .. new_count)
+            if current_rate > rate then
+                ngx.log(ngx.CRIT,'open circuit')
+                open_circuit(dict_name,key,start_of_period+scale)
+            end
+
+            -- put it into the connection pool of size 100,
+            -- with 10 seconds max idle time
+            local ok, err = red:set_keepalive(10000, 1000)
+            if not ok then
+                ngx.log(ngx.WARN, "failed to set keepalive: ", err)
             end
         end
     else
