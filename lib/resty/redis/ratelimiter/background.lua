@@ -9,6 +9,13 @@ local floor = math.floor
 local tonumber = tonumber
 local null = ngx.null
 
+local redis_host_default = '127.0.0.1'
+local redis_port_default = 6379
+local redis_timeout_default = 300
+local redis_dbid_default = nil
+
+local FAILED_TO_RETURN_CONNECTION = "failed_returning_connection_to_pool"
+local FAILED_TO_SET_KEY_EXPIRY = "failed_set_key_expiry"
 
 local _M = {
     _VERSION = "0.03",
@@ -23,7 +30,35 @@ local function is_str(s)
 end
 
 
+local function _redis_defaults(redis_cfg,window_size_in_seconds)
+    if redis_cfg['host'] == nil then
+        redis_cfg['host'] = redis_host_default
+    end
 
+    if redis_cfg['port'] == nil then
+        redis_cfg['port'] = redis_port_default
+    end
+
+    if redis_cfg['timeout'] == nil then
+        redis_cfg['timeout'] = redis_timeout_default
+    end
+
+    if redis_cfg['dbid'] == nil then
+        redis_cfg['dbid'] = redis_dbid_default
+    end
+
+    if redis_cfg['idle_keepalive_ms'] == nil then
+        redis_cfg['idle_keepalive_ms'] = 10000
+    end
+
+    if redis_cfg['connection_pool_size'] == nil then
+        redis_cfg['connection_pool_size'] = 100
+    end
+
+    if redis_cfg['expire_after_ms'] == nil then
+        redis_cfg['expire_after_ms'] = window_size_in_seconds * 5
+    end
+end
 
 -- local lim, err = class.new(zone, rate, burst, duration)
 function _M.new(zone, rate, circuit_breaker_dict_name, redis_cfg)
@@ -32,30 +67,8 @@ function _M.new(zone, rate, circuit_breaker_dict_name, redis_cfg)
     local circuit_breaker_dict_name = circuit_breaker_dict_name or "ratelimit_circuit_breaker"
 
     if type(redis_cfg) ~= "table" then
-        redis_cfg = {
-            host = '127.0.0.1',
-            port = 6379,
-            timeout = 200,
-            dbid = nil
-        }
+        redis_cfg = {}
     end
-
-    if redis_cfg['host'] == nil then
-        redis_cfg['host'] = '127.0.0.1'
-    end
-
-    if redis_cfg['port'] == nil then
-        redis_cfg['port'] = 6379
-    end
-
-    if redis_cfg['timeout'] == nil then
-        redis_cfg['timeout'] = 1000
-    end
-
-    if redis_cfg['dbid'] == nil then
-        redis_cfg['dbid'] = nil
-    end
-
 
     local scale = 1
     local len = #rate
@@ -69,6 +82,8 @@ function _M.new(zone, rate, circuit_breaker_dict_name, redis_cfg)
 
     rate = tonumber(rate)
 
+    _redis_defaults(redis_cfg,scale)
+
     assert(rate > 0 and scale >= 0)
 
     return setmetatable({
@@ -81,14 +96,7 @@ function _M.new(zone, rate, circuit_breaker_dict_name, redis_cfg)
 end
 
 
-local function redis_create(host, port, timeout_millis, dbid)
-    timeout_millis = timeout_millis or 1000
-    host = host or "127.0.0.1"
-    port = port or 6379
-
-    ngx.log(ngx.CRIT,port)
-    ngx.log(ngx.CRIT,timeout_millis)
-    ngx.log(ngx.CRIT,dbid)
+local function _redis_create(host, port, timeout_millis, dbid)
 
     local red = redis:new()
 
@@ -158,24 +166,32 @@ local function get_start_of_period(scale,requesttime)
     return seconds
 end
 
-local function expire(premature, key,scale,rd_host,rd_port,timeout,rd_dbid)
+local function expire(premature, key,scale,rd_cfg)
     local not_expired = true
     local expire_tries = 0
     local last_err = nil
-    while not_expired and expire_tries < 2 do
+    local retry = true
+
+    while retry do
         expire_tries=expire_tries+1
-        local red_exp, last_err = redis_create(rd_host,rd_port,
-                                            1000,rd_dbid)
+        local red_exp, last_err = _redis_create(rd_cfg.host,rd_cfg.port,
+                                                rd_cfg.timeout,rd_cfg.dbid)
         if red_exp ~= nil then
-            local res, last_err = red_exp:expire(key,scale*10)
-            if not err then
+            local res, last_err = red_exp:expire(key,rd_cfg.expire_after_ms)
+            if last_err == nil then
                 not_expired = false
-                local ok, err = red_exp:set_keepalive(10000, 1000)
+                retry = false
+                local ok, err = red_exp:set_keepalive(rd_cfg.idle_keepalive_ms, rd_cfg.connection_pool_size)
                 if not ok then
-                    ngx.log(ngx.WARN, "failed to set keepalive: ", err)
+                    ngx.log(ngx.WARN,'|{"level" : "WARN", "msg" : "' .. FAILED_TO_RETURN_CONNECTION .. '"}', err)
                 end
             else
-                ngx.log(ngx.WARN, "failed to set expire for key: ", last_err)
+                retry = expire_tries <= 2
+                if retry then
+                    ngx.log(ngx.WARN, '|{"level" : "WARN", "msg" : "' .. FAILED_TO_SET_KEY_EXPIRY .. '", "key": "' .. key .. '", "retry" : "true" }', last_err)
+                else
+                    ngx.log(ngx.ERR, '|{"level" : "ERROR", "msg" : "' .. FAILED_TO_SET_KEY_EXPIRY .. '", "key": "' .. key .. '", "retry" : "false" }', last_err)
+                end
                 red_exp:close()
             end
         end
@@ -183,21 +199,21 @@ local function expire(premature, key,scale,rd_host,rd_port,timeout,rd_dbid)
 
     if not_expired then
         if is_str(last_err) then
-            ngx.log(ngx.ERR,"Unable to set expirey on " .. key .. ":" .. err)
+            ngx.log(ngx.ERR,'|{"level" : "ERROR", "msg" : "' .. FAILED_TO_SET_KEY_EXPIRY .. '", "key": "' .. key .. '" }', last_err)
         else
-            ngx.log(ngx.ERR,"Unable to set expirey on " .. key)
+            ngx.log(ngx.ERR,'|{"level" : "ERROR", "msg" : "' .. FAILED_TO_SET_KEY_EXPIRY .. '", "key": "' .. key .. '" }')
         end
     end
 
 end
 
-local function increment_limit(premature,rd_host,rd_port,rd_timeout,rd_dbid,dict_name,
+local function increment_limit(premature,rd_cfg,dict_name,
                                key,rate,scale,requesttime)
 
-    local red, err = redis_create(rd_host,rd_port,
-                                  rd_timeout,rd_dbid)
+    local red, err = _redis_create(rd_cfg.host,rd_cfg.port,
+                                   rd_cfg.timeout,rd_cfg.dbid)
     if not red then
-        ngx.log(ngx.ERR, "failed to talk to redis: ", err)
+        ngx.log(ngx.ERR, '|{"level" : "ERROR", "msg" : "failed_connecting_to_redis", "incremented_counter":"false", "key" : "' .. key .. '" }', err)
         return false
     end
 
@@ -210,9 +226,10 @@ local function increment_limit(premature,rd_host,rd_port,rd_timeout,rd_dbid,dict
     local results, err = red:commit_pipeline()
 
     if results ~= nil then
+        ngx.log(ngx.INFO,'|{"level" : "INFO", "incremented_counter" : "true", "key" : "' .. key .. '"}')
         local new_count = results[1]
         if new_count == 1 then
-            ngx.timer.at(0, expire,curr,scale,rd_host,rd_port,rd_timeout,rd_dbid)
+            ngx.timer.at(0, expire,curr,scale,rd_cfg)
         else
             local res = results[2]
 
@@ -223,24 +240,24 @@ local function increment_limit(premature,rd_host,rd_port,rd_timeout,rd_dbid,dict
             local elapsed = requesttime - start_of_period
             local current_rate = old_number_of_requests * ( (scale - elapsed) / scale) + new_count
 
-            ngx.log(ngx.CRIT,current_rate .. ':' .. rate .. ':' .. old_number_of_requests .. ':' .. new_count)
+            ngx.log(ngx.INFO,'|{"level" : "INFO",  "key" : "' .. key .. '", "msg" : "current_rate", "number_of_old_requests" : "' .. old_number_of_requests .. ', "number_of_new_requests" :' .. new_count .. ', "current_rate" :' .. current_rate .. ', "rate_limit" :' .. rate .. ' }')
+
             if current_rate > rate then
-                ngx.log(ngx.CRIT,'open circuit')
+                ngx.log(ngx.INFO,'|{"level" : "INFO",  "key" : "' .. key .. '" , "msg" : "opening_rate_limit_circuit", "number_of_old_requests" : "' .. old_number_of_requests .. ', "number_of_new_requests" :' .. new_count .. ', "current_rate" :' .. current_rate .. ', "rate_limit" :' .. rate .. ' }')
                 open_circuit(dict_name,key,start_of_period+scale)
             end
 
-            -- put it into the connection pool of size 100,
-            -- with 10 seconds max idle time
-            local ok, err = red:set_keepalive(10000, 1000)
+            -- put it into the connection pool
+            local ok, err = red:set_keepalive(rd_cfg.idle_keepalive_ms, rd_cfg.connection_pool_size)
             if not ok then
-                ngx.log(ngx.WARN, "failed to set keepalive: ", err)
+                ngx.log(ngx.INFO,'|{"level" : "INFO", "msg" : "failed_returning_connection_to_pool"}', err)
             end
         end
     else
-        ngx.log(ngx.CRIT,"timeout for incr",err)
+        ngx.log(ngx.ERR,'|{"level" : "ERROR", "msg" : "increment_rate_limit_timeout",  "incremented_counter" : "false", "key" : "' .. key .. '" }',err)
         ok, err = red:close()
         if not ok then
-            ngx.log(ngx.WARN,"failed to close redis connection")
+            ngx.log(ngx.INFO,'|{"level" : "INFO", "msg" : "failed_closing_connection"}',err)
         end
     end
 
@@ -266,8 +283,7 @@ function _M.is_rate_limited(self, key, requesttime)
 
     if is_request_allowed(dict_name,formatted_key,requesttime) then
         local ok, err = ngx.timer.at(0, increment_limit,
-                                     redis_cfg.host, redis_cfg.port,
-                                     redis_cfg.timeout, redis_cfg.dbid,
+                                     redis_cfg,
                                      dict_name,formatted_key,
                                      rate,scale,requesttime)
         return false
