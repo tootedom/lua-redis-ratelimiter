@@ -69,7 +69,6 @@ lua_shared_dict ratelimit_circuit_breaker 1m;
 ```
 
 
-
 ----
 
 # Background Ratelimiter
