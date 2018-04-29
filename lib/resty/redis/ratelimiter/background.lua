@@ -245,7 +245,7 @@ local function increment_limit(premature,rd_cfg,dict_name,
             local elapsed = requesttime - start_of_period
             local current_rate = old_number_of_requests * ( (scale - elapsed) / scale) + new_count
 
-            ngx.log(ngx.INFO,'|{"level" : "INFO",  "key" : "' .. key .. '", "msg" : "current_rate_report", "previous_period_key" : "' .. previous_period_key  .. '", "current_period_key" : "' .. currrent_period_key .. '", "number_of_old_requests" : ' .. old_number_of_requests .. ', "number_of_new_requests" : ' .. new_count .. ', "current_rate" : ' .. current_rate .. ', "rate_limit" : ' .. rate .. ' }|')
+            ngx.log(ngx.INFO,'|{"level" : "INFO",  "key" : "' .. key .. '", "msg" : "current_rate_report", "previous_period_key" : "' .. previous_period_key  .. '", "current_period_key" : "' .. currrent_period_key .. '", "number_of_old_requests" : ' .. old_number_of_requests .. ', "number_of_new_requests" : ' .. new_count .. ', "elasped_time_in_current_period" : ' .. elapsed .. ' , "current_rate" : ' .. current_rate .. ', "rate_limit" : ' .. rate .. ' }|')
 
             if current_rate >= rate then
                 ngx.log(ngx.INFO,'|{"level" : "INFO",  "key" : "' .. key .. '" , "msg" : "opening_rate_limit_circuit", "number_of_old_requests" : ' .. old_number_of_requests .. ', "number_of_new_requests" : ' .. new_count .. ', "current_rate" : ' .. current_rate .. ', "rate_limit" : ' .. rate .. ' }|')
