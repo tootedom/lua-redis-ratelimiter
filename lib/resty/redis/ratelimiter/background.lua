@@ -55,8 +55,8 @@ local function _redis_defaults(redis_cfg,window_size_in_seconds)
         redis_cfg['connection_pool_size'] = 100
     end
 
-    if redis_cfg['expire_after_ms'] == nil then
-        redis_cfg['expire_after_ms'] = window_size_in_seconds * 5
+    if redis_cfg['expire_after_seconds'] == nil then
+        redis_cfg['expire_after_seconds'] = window_size_in_seconds * 5
     end
 end
 
@@ -73,11 +73,16 @@ function _M.new(zone, rate, circuit_breaker_dict_name, redis_cfg)
     local scale = 1
     local len = #rate
 
-    if len > 3 and rate:sub(len - 2) == "r/s" then
+    if len>3 then
+        -- check for requests per minute.
+        -- default is requests per second
+        local rate_type = rate:sub(len - 2)
         rate = rate:sub(1, len - 3)
-    elseif len > 3 and rate:sub(len - 2) == "r/m" then
-        scale = 60
-        rate = rate:sub(1, len - 3)
+        if rate_type == "r/m" then
+            scale = 60
+        end
+    else
+        rate = 1
     end
 
     rate = tonumber(rate)
@@ -85,6 +90,7 @@ function _M.new(zone, rate, circuit_breaker_dict_name, redis_cfg)
     _redis_defaults(redis_cfg,scale)
 
     assert(rate > 0 and scale >= 0)
+    assert(redis_cfg['expire_after_seconds'] >= (scale * 3))
 
     return setmetatable({
             zone = zone,
@@ -138,11 +144,10 @@ local function is_circuit_open(dict_name,key,requesttime)
     if dict ~= nil then
         local limited = dict:get(key)
         if limited ~= nil then
-            if requesttime < limited then
+            if requesttime <= limited then
                 return true
             end
             dict:delete(key)
-            return false
         end
         return false
     end
@@ -177,20 +182,20 @@ local function expire(premature, key,scale,rd_cfg)
         local red_exp, last_err = _redis_create(rd_cfg.host,rd_cfg.port,
                                                 rd_cfg.timeout,rd_cfg.dbid)
         if red_exp ~= nil then
-            local res, last_err = red_exp:expire(key,rd_cfg.expire_after_ms)
+            local res, last_err = red_exp:expire(key,rd_cfg.expire_after_seconds)
             if last_err == nil then
                 not_expired = false
                 retry = false
                 local ok, err = red_exp:set_keepalive(rd_cfg.idle_keepalive_ms, rd_cfg.connection_pool_size)
                 if not ok then
-                    ngx.log(ngx.WARN,'|{"level" : "WARN", "msg" : "' .. FAILED_TO_RETURN_CONNECTION .. '"}', err)
+                    ngx.log(ngx.WARN,'|{"level" : "WARN", "msg" : "' .. FAILED_TO_RETURN_CONNECTION .. '"}|', err)
                 end
             else
                 retry = expire_tries <= 2
                 if retry then
-                    ngx.log(ngx.WARN, '|{"level" : "WARN", "msg" : "' .. FAILED_TO_SET_KEY_EXPIRY .. '", "key": "' .. key .. '", "retry" : "true" }', last_err)
+                    ngx.log(ngx.WARN, '|{"level" : "WARN", "msg" : "' .. FAILED_TO_SET_KEY_EXPIRY .. '", "key": "' .. key .. '", "retry" : "true" }|', last_err)
                 else
-                    ngx.log(ngx.ERR, '|{"level" : "ERROR", "msg" : "' .. FAILED_TO_SET_KEY_EXPIRY .. '", "key": "' .. key .. '", "retry" : "false" }', last_err)
+                    ngx.log(ngx.ERR, '|{"level" : "ERROR", "msg" : "' .. FAILED_TO_SET_KEY_EXPIRY .. '", "key": "' .. key .. '", "retry" : "false" }|', last_err)
                 end
                 red_exp:close()
             end
@@ -199,9 +204,9 @@ local function expire(premature, key,scale,rd_cfg)
 
     if not_expired then
         if is_str(last_err) then
-            ngx.log(ngx.ERR,'|{"level" : "ERROR", "msg" : "' .. FAILED_TO_SET_KEY_EXPIRY .. '", "key": "' .. key .. '" }', last_err)
+            ngx.log(ngx.ERR,'|{"level" : "ERROR", "msg" : "' .. FAILED_TO_SET_KEY_EXPIRY .. '", "key": "' .. key .. '" }|', last_err)
         else
-            ngx.log(ngx.ERR,'|{"level" : "ERROR", "msg" : "' .. FAILED_TO_SET_KEY_EXPIRY .. '", "key": "' .. key .. '" }')
+            ngx.log(ngx.ERR,'|{"level" : "ERROR", "msg" : "' .. FAILED_TO_SET_KEY_EXPIRY .. '", "key": "' .. key .. '" }|')
         end
     end
 
@@ -213,23 +218,23 @@ local function increment_limit(premature,rd_cfg,dict_name,
     local red, err = _redis_create(rd_cfg.host,rd_cfg.port,
                                    rd_cfg.timeout,rd_cfg.dbid)
     if not red then
-        ngx.log(ngx.ERR, '|{"level" : "ERROR", "msg" : "failed_connecting_to_redis", "incremented_counter":"false", "key" : "' .. key .. '" }', err)
+        ngx.log(ngx.ERR, '|{"level" : "ERROR", "msg" : "failed_connecting_to_redis", "incremented_counter":"false", "key" : "' .. key .. '" }|', err)
         return false
     end
 
     local start_of_period = get_start_of_period(scale,requesttime)
-    local curr, old = get_keys(scale,key,start_of_period)
+    local currrent_period_key, previous_period_key = get_keys(scale,key,start_of_period)
 
     red:init_pipeline(n)
-    red:incr(curr)
-    red:get(old)
+    red:incr(currrent_period_key)
+    red:get(previous_period_key)
     local results, err = red:commit_pipeline()
 
     if results ~= nil then
-        ngx.log(ngx.INFO,'|{"level" : "INFO", "incremented_counter" : "true", "key" : "' .. key .. '"}')
+        ngx.log(ngx.INFO,'|{"level" : "INFO", "incremented_counter" : "true", "key" : "' .. key .. '"}|')
         local new_count = results[1]
         if new_count == 1 then
-            ngx.timer.at(0, expire,curr,scale,rd_cfg)
+            ngx.timer.at(0, expire,currrent_period_key,scale,rd_cfg)
         else
             local res = results[2]
 
@@ -240,24 +245,24 @@ local function increment_limit(premature,rd_cfg,dict_name,
             local elapsed = requesttime - start_of_period
             local current_rate = old_number_of_requests * ( (scale - elapsed) / scale) + new_count
 
-            ngx.log(ngx.INFO,'|{"level" : "INFO",  "key" : "' .. key .. '", "msg" : "current_rate", "number_of_old_requests" : "' .. old_number_of_requests .. ', "number_of_new_requests" :' .. new_count .. ', "current_rate" :' .. current_rate .. ', "rate_limit" :' .. rate .. ' }')
+            ngx.log(ngx.INFO,'|{"level" : "INFO",  "key" : "' .. key .. '", "msg" : "current_rate_report", "previous_period_key" : "' .. previous_period_key  .. '", "current_period_key" : "' .. currrent_period_key .. '", "number_of_old_requests" : ' .. old_number_of_requests .. ', "number_of_new_requests" : ' .. new_count .. ', "current_rate" : ' .. current_rate .. ', "rate_limit" : ' .. rate .. ' }|')
 
-            if current_rate > rate then
-                ngx.log(ngx.INFO,'|{"level" : "INFO",  "key" : "' .. key .. '" , "msg" : "opening_rate_limit_circuit", "number_of_old_requests" : "' .. old_number_of_requests .. ', "number_of_new_requests" :' .. new_count .. ', "current_rate" :' .. current_rate .. ', "rate_limit" :' .. rate .. ' }')
+            if current_rate >= rate then
+                ngx.log(ngx.INFO,'|{"level" : "INFO",  "key" : "' .. key .. '" , "msg" : "opening_rate_limit_circuit", "number_of_old_requests" : ' .. old_number_of_requests .. ', "number_of_new_requests" : ' .. new_count .. ', "current_rate" : ' .. current_rate .. ', "rate_limit" : ' .. rate .. ' }|')
                 open_circuit(dict_name,key,start_of_period+scale)
             end
 
             -- put it into the connection pool
             local ok, err = red:set_keepalive(rd_cfg.idle_keepalive_ms, rd_cfg.connection_pool_size)
             if not ok then
-                ngx.log(ngx.INFO,'|{"level" : "INFO", "msg" : "failed_returning_connection_to_pool"}', err)
+                ngx.log(ngx.INFO,'|{"level" : "INFO", "msg" : "failed_returning_connection_to_pool"}|', err)
             end
         end
     else
-        ngx.log(ngx.ERR,'|{"level" : "ERROR", "msg" : "increment_rate_limit_timeout",  "incremented_counter" : "false", "key" : "' .. key .. '" }',err)
+        ngx.log(ngx.ERR,'|{"level" : "ERROR", "msg" : "increment_rate_limit_timeout",  "incremented_counter" : "false", "key" : "' .. key .. '" }|',err)
         ok, err = red:close()
         if not ok then
-            ngx.log(ngx.INFO,'|{"level" : "INFO", "msg" : "failed_closing_connection"}',err)
+            ngx.log(ngx.INFO,'|{"level" : "INFO", "msg" : "failed_closing_connection"}|',err)
         end
     end
 
