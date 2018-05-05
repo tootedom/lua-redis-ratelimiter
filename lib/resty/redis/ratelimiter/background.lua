@@ -9,6 +9,7 @@ local floor = math.floor
 local tonumber = tonumber
 local null = ngx.null
 
+local shared_dict_default = 'ratelimit_circuit_breaker'
 local redis_host_default = '127.0.0.1'
 local redis_port_default = 6379
 local redis_timeout_default = 300
@@ -30,44 +31,47 @@ local function is_str(s)
 end
 
 
-local function _redis_defaults(redis_cfg,window_size_in_seconds)
-    if redis_cfg['host'] == nil then
-        redis_cfg['host'] = redis_host_default
+local function _defaults(cfg,window_size_in_seconds)
+    if cfg['host'] == nil then
+        cfg['host'] = redis_host_default
     end
 
-    if redis_cfg['port'] == nil then
-        redis_cfg['port'] = redis_port_default
+    if cfg['port'] == nil then
+        cfg['port'] = redis_port_default
     end
 
-    if redis_cfg['timeout'] == nil then
-        redis_cfg['timeout'] = redis_timeout_default
+    if cfg['timeout'] == nil then
+        cfg['timeout'] = redis_timeout_default
     end
 
-    if redis_cfg['dbid'] == nil then
-        redis_cfg['dbid'] = redis_dbid_default
+    if cfg['dbid'] == nil then
+        cfg['dbid'] = redis_dbid_default
     end
 
-    if redis_cfg['idle_keepalive_ms'] == nil then
-        redis_cfg['idle_keepalive_ms'] = 10000
+    if cfg['idle_keepalive_ms'] == nil then
+        cfg['idle_keepalive_ms'] = 10000
     end
 
-    if redis_cfg['connection_pool_size'] == nil then
-        redis_cfg['connection_pool_size'] = 100
+    if cfg['connection_pool_size'] == nil then
+        cfg['connection_pool_size'] = 100
     end
 
-    if redis_cfg['expire_after_seconds'] == nil then
-        redis_cfg['expire_after_seconds'] = window_size_in_seconds * 5
+    if cfg['expire_after_seconds'] == nil then
+        cfg['expire_after_seconds'] = window_size_in_seconds * 5
+    end
+
+    if cfg['circuit_breaker_dict_name'] == nil then
+        cfg['circuit_breaker_dict_name'] = shared_dict_default
     end
 end
 
 -- local lim, err = class.new(zone, rate, burst, duration)
-function _M.new(zone, rate, circuit_breaker_dict_name, redis_cfg)
+function _M.new(zone, rate, cfg)
     local zone = zone or "ratelimit"
     local rate = rate or "1r/s"
-    local circuit_breaker_dict_name = circuit_breaker_dict_name or "ratelimit_circuit_breaker"
 
-    if type(redis_cfg) ~= "table" then
-        redis_cfg = {}
+    if type(cfg) ~= "table" then
+        cfg = {}
     end
 
     local scale = 1
@@ -87,17 +91,17 @@ function _M.new(zone, rate, circuit_breaker_dict_name, redis_cfg)
 
     rate = tonumber(rate)
 
-    _redis_defaults(redis_cfg,scale)
+    _defaults(cfg,scale)
 
-    assert(rate > 0 and scale >= 0)
-    assert(redis_cfg['expire_after_seconds'] >= (scale * 3))
+    assert(rate > 0 and scale >= 0, 'Invalid rate limit, supported are r/s, r/m, given:'.. rate)
+    assert(cfg['expire_after_seconds'] >= (scale * 3),"Invalid Expire time for keys for 'expire_after_seconds'")
 
     return setmetatable({
             zone = zone,
             rate = rate,
             scale = scale,
-            circuit_breaker_dict_name = circuit_breaker_dict_name,
-            redis_cfg = redis_cfg,
+            circuit_breaker_dict_name = cfg['circuit_breaker_dict_name'],
+            cfg = cfg,
     }, mt)
 end
 
@@ -132,32 +136,36 @@ local function _redis_create(host, port, timeout_millis, dbid)
     return red
 end
 
--- Returns the current key
--- and the previous key based on the current nginx request time.
+--
+-- Returns the current key and the previous key 
+-- based on the current nginx request time, and the scale.
+-- key is <zone:key>_<epoch for period>
+--
 local function get_keys(scale, key, start_of_period)
     return string.format("%s_%d",key,start_of_period),string.format("%s_%d",key,start_of_period-scale)
 end
 
-
-local function is_circuit_open(dict_name,key,requesttime)
+-- When rate limiting is in effect for a client
+-- an entry in the shared dict will be present for that
+-- key.
+--
+-- when the circuit is close (requests flowing normally) true is returned
+-- when rate limiting is in effect, the circuit is open, false is returned
+local function circuit_is_closed(dict_name,key)
     local dict = ngx.shared[dict_name]
     if dict ~= nil then
         local limited = dict:get(key)
         if limited ~= nil then
-            if requesttime <= limited then
-                return true
-            end
-            dict:delete(key)
+           return false
         end
-        return false
     end
-    return false
+    return true
 end
 
-local function open_circuit(dict_name,key,time)
+local function open_circuit(dict_name,key,expiry)
     local dict = ngx.shared[dict_name]
     if dict ~= nil then
-        dict:set(key,time)
+        dict:set(key,1,expiry)
     end
 end
 
@@ -171,7 +179,7 @@ local function get_start_of_period(scale,requesttime)
     return seconds
 end
 
-local function expire(premature, key,scale,rd_cfg)
+local function expire(premature, key,scale,cfg)
     local not_expired = true
     local expire_tries = 0
     local last_err = nil
@@ -179,14 +187,14 @@ local function expire(premature, key,scale,rd_cfg)
 
     while retry do
         expire_tries=expire_tries+1
-        local red_exp, last_err = _redis_create(rd_cfg.host,rd_cfg.port,
-                                                rd_cfg.timeout,rd_cfg.dbid)
+        local red_exp, last_err = _redis_create(cfg.host,cfg.port,
+                                                cfg.timeout,cfg.dbid)
         if red_exp ~= nil then
-            local res, last_err = red_exp:expire(key,rd_cfg.expire_after_seconds)
+            local res, last_err = red_exp:expire(key,cfg.expire_after_seconds)
             if last_err == nil then
                 not_expired = false
                 retry = false
-                local ok, err = red_exp:set_keepalive(rd_cfg.idle_keepalive_ms, rd_cfg.connection_pool_size)
+                local ok, err = red_exp:set_keepalive(cfg.idle_keepalive_ms, cfg.connection_pool_size)
                 if not ok then
                     ngx.log(ngx.WARN,'|{"level" : "WARN", "msg" : "' .. FAILED_TO_RETURN_CONNECTION .. '"}|', err)
                 end
@@ -212,11 +220,11 @@ local function expire(premature, key,scale,rd_cfg)
 
 end
 
-local function increment_limit(premature,rd_cfg,dict_name,
+local function increment_limit(premature,cfg,dict_name,
                                key,rate,scale,requesttime)
 
-    local red, err = _redis_create(rd_cfg.host,rd_cfg.port,
-                                   rd_cfg.timeout,rd_cfg.dbid)
+    local red, err = _redis_create(cfg.host,cfg.port,
+                                   cfg.timeout,cfg.dbid)
     if not red then
         ngx.log(ngx.ERR, '|{"level" : "ERROR", "msg" : "failed_connecting_to_redis", "incremented_counter":"false", "key" : "' .. key .. '" }|', err)
         return false
@@ -234,7 +242,7 @@ local function increment_limit(premature,rd_cfg,dict_name,
         ngx.log(ngx.INFO,'|{"level" : "INFO", "incremented_counter" : "true", "key" : "' .. key .. '"}|')
         local new_count = results[1]
         if new_count == 1 then
-            ngx.timer.at(0, expire,currrent_period_key,scale,rd_cfg)
+            ngx.timer.at(0, expire,currrent_period_key,scale,cfg)
         else
             local res = results[2]
 
@@ -249,11 +257,11 @@ local function increment_limit(premature,rd_cfg,dict_name,
 
             if current_rate >= rate then
                 ngx.log(ngx.INFO,'|{"level" : "INFO",  "key" : "' .. key .. '" , "msg" : "opening_rate_limit_circuit", "number_of_old_requests" : ' .. old_number_of_requests .. ', "number_of_new_requests" : ' .. new_count .. ', "current_rate" : ' .. current_rate .. ', "rate_limit" : ' .. rate .. ' }|')
-                open_circuit(dict_name,key,start_of_period+scale)
+                open_circuit(dict_name,key,scale - elapsed)
             end
 
             -- put it into the connection pool
-            local ok, err = red:set_keepalive(rd_cfg.idle_keepalive_ms, rd_cfg.connection_pool_size)
+            local ok, err = red:set_keepalive(cfg.idle_keepalive_ms, cfg.connection_pool_size)
             if not ok then
                 ngx.log(ngx.INFO,'|{"level" : "INFO", "msg" : "failed_returning_connection_to_pool"}|', err)
             end
@@ -268,27 +276,18 @@ local function increment_limit(premature,rd_cfg,dict_name,
 
 end
 
---
-local function is_request_allowed(dict_name, key, requesttime)
-    if is_circuit_open(dict_name,key,requesttime) then
-        return false
-    end
-
-    return true
-end
-
 
 -- local delay, err = lim:incoming(key, redis)
 function _M.is_rate_limited(self, key, requesttime)
     local formatted_key =  self.zone .. ":" .. key
     local dict_name = self.circuit_breaker_dict_name
-    local redis_cfg = self.redis_cfg
+    local cfg = self.cfg
     local rate = self.rate
     local scale = self.scale
 
-    if is_request_allowed(dict_name,formatted_key,requesttime) then
+    if circuit_is_closed(dict_name,formatted_key) then
         local ok, err = ngx.timer.at(0, increment_limit,
-                                     redis_cfg,
+                                     cfg,
                                      dict_name,formatted_key,
                                      rate,scale,requesttime)
         return false
