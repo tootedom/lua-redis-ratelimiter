@@ -99,11 +99,20 @@ If you are using multiple shared dicts, you still need to made sure the "zone" i
 
 # Background Ratelimiter
 
-The background ratelimiter relies on the use of [nginx shared dicts](https://github.com/openresty/lua-nginx-module#ngxshareddict)
+The background rate limit performs redis operations in a the background using a light wieght thread. [ngx.timer.at](https://github.com/openresty/lua-nginx-module#ngxtimerat)
+The reason for use of background thread is so that redis operations will not add to any client request's response time.  However, this does mean
+it is possible for background tasks to accumulate in the server and exhaust system resources due to just too much client traffic.
+
+To prevent extreme consequences like crashing the Nginx server, there are built-in limitations on both the number of "pending timers" and the number of "running timers" in an Nginx worker process. The "pending timers" here mean timers that have not yet been expired and "running timers" are those whose user callbacks are currently running.
+
+The maximal number of pending timers allowed in an Nginx worker is controlled by the [lua_max_pending_timers](https://github.com/openresty/lua-nginx-module#lua_max_pending_timers) directive. The maximal number of running timers is controlled by the [lua_max_running_timers](https://github.com/openresty/lua-nginx-module#lua_max_running_timers) directive.
+
+Make sure you check the error log for "too many pending timers" or "lua_max_running_timers are not enough"
+
+By using background rate limiting, it also means it is possible to allow in a burst of traffic, before the current nginx's shared dict circuit breaker is flipped and traffic is rate limited.  As a result it is possible that more traffic that the allow rate limit is let through in a spike.  Depending upon the response time of redis to process the increment that takes the current requests over the limit, is the window of time that the spike of requests will be allowed through.
 
 
-
-
+# Quick Example
 
 ```
     location /t {
@@ -111,7 +120,7 @@ The background ratelimiter relies on the use of [nginx shared dicts](https://git
 
             local ratelimit = require "resty.redis.ratelimiter.background"
             local red = { host = "127.0.0.1", port = 6379, timeout = 100 , expire_after_seconds = 5}
-            local lim, err = ratelimit.new("one", "2r/s", "ratelimit_circuit_breaker", red)
+            local lim, err = ratelimit.new("one", "2r/s", red)
             if not lim then
                 ngx.log(ngx.ERR,
                         "failed to instantiate a resty.redis.ratelimiter.background object: ", err)

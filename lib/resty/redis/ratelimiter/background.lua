@@ -165,7 +165,7 @@ end
 local function open_circuit(dict_name,key,expiry)
     local dict = ngx.shared[dict_name]
     if dict ~= nil then
-        dict:set(key,1,expiry)
+        dict:add(key,1,expiry)
     end
 end
 
