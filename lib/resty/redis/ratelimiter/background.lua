@@ -226,7 +226,7 @@ local function increment_limit(premature,cfg,dict_name,
     local red, err = _redis_create(cfg.host,cfg.port,
                                    cfg.timeout,cfg.dbid)
     if not red then
-        ngx.log(ngx.ERR, '|{"level" : "ERROR", "msg" : "failed_connecting_to_redis", "incremented_counter":"false", "key" : "' .. key .. '" }|', err)
+        ngx.log(ngx.ERR, '|{"level" : "ERROR", "msg" : "failed_connecting_to_redis", "incremented_counter":"false", "key" : "' .. key .. '", "host":"' .. cfg.host .. '", "port":"' .. cfg.port .. '" }|', err)
         return false
     end
 
