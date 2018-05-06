@@ -26,8 +26,11 @@ Implementation of global rate limiting for nginx using Redis as a back end.
 # Pre Requistes
 
 - Nginx that can use Lua.  For example [Openresty](https://github.com/openresty/)
-- [resty redis library](https://github.com/openresty/lua-resty-redis).
-- Redis (can be your own or an AWS elasticache redis master/replica setup. Have not tried with AWS cluster mode)
+-- Needs the nginx lua development kit: [lua-nginx-module](https://github.com/openresty/lua-nginx-module)
+
+- The Lua Nginx cosocket library: [resty redis library](https://github.com/openresty/lua-resty-redis).
+
+- A Redis Backend. This can be your own or an AWS elasticache redis master/replica setup (*Have not tried with AWS cluster mode*).
 
 ----
 
@@ -63,7 +66,7 @@ As a result we store 2 keys in Redis per rate limit counter.  The currently incr
 For example for the following:
 ```
 local key = ngx.var.remote_addr
-local is_rate_limited = lim:is_rate_limited(key, ngx.req.start_time())
+local is_rate_limited = lim:is_rate_limited(key)
 ```
 
 The keys in REDIS will look something like the following, for rate limit by seconds:
@@ -158,7 +161,7 @@ server {
     location /login {
 
         access_by_lua_block {
-            if login:is_rate_limited(ngx.var.remote_addr, ngx.req.start_time()) then
+            if login:is_rate_limited(ngx.var.remote_addr) then
                 return ngx.exit(429)
             end
         }
@@ -205,7 +208,7 @@ Inside a `server` in one of the `/etc/nginx/conf.d/*.conf` includes:
                 return ngx.exit(500)
             end
 
-            local is_rate_limited = lim:is_rate_limited(ngx.var.remote_addr, ngx.req.start_time())
+            local is_rate_limited = lim:is_rate_limited(ngx.var.remote_addr)
 
             if is_rate_limited then
                 return ngx.exit(429)
@@ -279,7 +282,7 @@ Rate limiting is done by
 
 ```
 access_by_lua_block {
-    if login:is_rate_limited(<value you are rate limiting on>, ngx.req.start_time()) then
+    if login:is_rate_limited(<value you are rate limiting on>) then
         return ngx.exit(429)
         end
 }

@@ -278,7 +278,7 @@ end
 
 
 -- local delay, err = lim:incoming(key, redis)
-function _M.is_rate_limited(self, key, requesttime)
+function _M.is_rate_limited(self, key)
     local formatted_key =  self.zone .. ":" .. key
     local dict_name = self.circuit_breaker_dict_name
     local cfg = self.cfg
@@ -289,7 +289,7 @@ function _M.is_rate_limited(self, key, requesttime)
         local ok, err = ngx.timer.at(0, increment_limit,
                                      cfg,
                                      dict_name,formatted_key,
-                                     rate,scale,requesttime)
+                                     rate,scale,ngx.req.start_time())
         return false
     end
 
