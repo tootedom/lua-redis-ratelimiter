@@ -158,7 +158,7 @@ local function _redis_create(host, port, timeout_millis, dbid)
 end
 
 --
--- Returns the current key and the previous key 
+-- Returns the current key and the previous key
 -- based on the current nginx request time, and the scale.
 -- key is <zone:key>_<epoch for period>
 --
@@ -280,7 +280,9 @@ local function increment_limit(premature,cfg,dict_name,
             if current_rate >= rate then
                 ngx.log(ngx.INFO,'|{"level" : "INFO",  "key" : "' .. key .. '" , "msg" : "opening_rate_limit_circuit", "number_of_old_requests" : ' .. old_number_of_requests .. ', "number_of_new_requests" : ' .. new_count .. ', "current_rate" : ' .. current_rate .. ', "rate_limit" : ' .. rate .. ' }|')
                 open_circuit(dict_name,key,scale - elapsed)
-                rate_limited = true
+                if current_rate > rate then
+                    rate_limited = true
+                end
             end
         end
 

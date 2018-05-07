@@ -168,12 +168,12 @@ http {
     lua_shared_dict ratelimit_circuit_breaker 10m;
 
     init_by_lua_block {
-        local ratelimit = require "resty.redis.ratelimiter.limiter"
+        local ratelimit = require "resty.greencheek.redis.ratelimiter.limiter"
         local red = { host = "127.0.0.1", port = 6379, timeout = 100}
         login, err = ratelimit.new("login", "100r/s", red)
 
         if not login then
-            error("failed to instantiate a resty.redis.ratelimiter.limiter object")
+            error("failed to instantiate a resty.greencheek.redis.ratelimiter.limiter object")
         end
     }
 
@@ -227,13 +227,13 @@ Inside a `server` in one of the `/etc/nginx/conf.d/*.conf` includes:
     location /login {
         access_by_lua_block {
 
-            local ratelimit = require "resty.redis.ratelimiter.limiter"
+            local ratelimit = require "resty.greencheek.redis.ratelimiter.limiter"
             local red = { host = "127.0.0.1", port = 6379, timeout = 100}
             local lim, err = ratelimit.new("login", "100r/s", red)
 
             if not lim then
                 ngx.log(ngx.ERR,
-                        "failed to instantiate a resty.redis.ratelimiter.limiter object: ", err)
+                        "failed to instantiate a resty.greencheek.redis.ratelimiter.limiter object: ", err)
                 return ngx.exit(500)
             end
 
@@ -266,7 +266,7 @@ To use the rate `limiter` there's 3 steps:
 To use any ratelimiter, you need the [resty redis library](https://github.com/openresty/lua-resty-redis).
 
 ```
-local ratelimit = require "resty.redis.ratelimiter.limiter"
+local ratelimit = require "resty.greencheek.redis.ratelimiter.limiter"
 ```
 
 ### Create a rate limiting object
@@ -357,7 +357,7 @@ And then run from the root of the repo:
 ```
 docker run --rm -it -v $(pwd)/conf.d:/etc/nginx/conf.d -v $(pwd)/nginx.conf:/usr/local/openresty/nginx/conf/nginx.conf \
 -v $(pwd):/data \
--v $(pwd)/lib/resty/redis/ratelimiter/limiter.lua:/usr/local/openresty/lualib/resty/redis/ratelimiter/limiter.lua \
+-v $(pwd)/lib/resty/greencheek/redis/ratelimiter/limiter.lua:/usr/local/openresty/lualib/resty/greencheek/redis/ratelimiter/limiter.lua \
 ratelimiter:latest /bin/bash
 ```
 

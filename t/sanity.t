@@ -28,7 +28,7 @@ lua_shared_dict ratelimit_circuit_breaker 1m;
 --- config
     location /a {
         rewrite_by_lua '
-            local ratelimit = require "resty.redis.ratelimiter.background"
+            local ratelimit = require "resty.greencheek.redis.ratelimiter.limiter"
             local zone = "test1_" .. ngx.worker.pid()
             local lim, _ = ratelimit.new(zone, "2r/m")
             if not lim then
@@ -43,7 +43,7 @@ lua_shared_dict ratelimit_circuit_breaker 1m;
     }
     location /c {
         rewrite_by_lua '
-            local ratelimit = require "resty.redis.ratelimiter.background"
+            local ratelimit = require "resty.greencheek.redis.ratelimiter.limiter"
             local zone = "test1.2_" .. ngx.worker.pid()
             local lim, _ = ratelimit.new(zone, "2r/s")
             if not lim then
@@ -105,7 +105,7 @@ lua_shared_dict ratelimit_circuit_breaker 1m;
 --- config
     location /a {
         rewrite_by_lua '
-            local ratelimit = require "resty.redis.ratelimiter.background"
+            local ratelimit = require "resty.greencheek.redis.ratelimiter.limiter"
             local zone = "test2_" .. ngx.worker.pid()
             local method = ngx.req.get_method()
             local lim, _ = ratelimit.new(zone, "2r/m")
@@ -169,7 +169,7 @@ lua_shared_dict ratelimit_circuit_breaker 1m;
 --- config
     location /t {
         rewrite_by_lua '
-            local ratelimit = require "resty.redis.ratelimiter.background"
+            local ratelimit = require "resty.greencheek.redis.ratelimiter.limiter"
             local zone = "test3_" .. ngx.worker.pid()
             local red = { host = "127.0.0.1", port = 6388 }
             local lim, _ = ratelimit.new(zone, "2r/s", red)
@@ -205,7 +205,7 @@ lua_shared_dict filter_ratelimit_circuit_breaker 1m;
 --- config
     location /login {
         rewrite_by_lua '
-            local ratelimit = require "resty.redis.ratelimiter.background"
+            local ratelimit = require "resty.greencheek.redis.ratelimiter.limiter"
             local red = { circuit_breaker_dict_name = "login_ratelimit_circuit_breaker" }
             local zone = "login"
             local method = ngx.req.get_method()
@@ -227,7 +227,7 @@ lua_shared_dict filter_ratelimit_circuit_breaker 1m;
 
     location /filter {
         rewrite_by_lua '
-            local ratelimit = require "resty.redis.ratelimiter.background"
+            local ratelimit = require "resty.greencheek.redis.ratelimiter.limiter"
             local red = { circuit_breaker_dict_name = "filter_ratelimit_circuit_breaker" }
             local zone = "login"
             local method = ngx.req.get_method()
