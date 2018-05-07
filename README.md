@@ -1,14 +1,32 @@
+<!-- TOC -->
+
+- [Name](#name)
+- [Status](#status)
+- [Synopsis](#synopsis)
+- [Pre Requistes](#pre-requistes)
+- [Description](#description)
+- [Leaky Bucket and Sliding Window](#leaky-bucket-and-sliding-window)
+- [Background Ratelimiter](#background-ratelimiter)
+- [Foreground Ratelimiter](#foreground-ratelimiter)
+- [Quick Example](#quick-example)
+    - [Init and Access block](#init-and-access-block)
+    - [Access Block](#access-block)
+    - [API Specification](#api-specification)
+        - [Require the library](#require-the-library)
+        - [Create a rate limiting object](#create-a-rate-limiting-object)
+        - [Check if we should rate limit](#check-if-we-should-rate-limit)
+- [Redis Failure](#redis-failure)
+- [Local Testing](#local-testing)
+- [See Also](#see-also)
+
+<!-- /TOC -->
+
+
 # Name
 
+Redis Backed Ratelimiter
 
-
-# Table of Contents
-
-* [Status](#status)
-* [Description](#description)
-* [Synopsis](#synopsis)
-* [Methods](#methods)
-    * [new](#new)
+----
 
 # Status
 
