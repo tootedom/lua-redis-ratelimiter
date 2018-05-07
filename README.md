@@ -36,9 +36,12 @@ Implementation of global rate limiting for nginx using Redis as a back end.
 
 # Description
 
-There are a couple of variations of the rate limiting within the library, depending upon your needs for
-accuracy and/or performance.  The recommended ratelimiter is the *background* ratelimiter that is based
-the cloudflare ratelimiter as described on this blog (I have no knowledge of the actual implementation details of the cloudflare rate limiter.  The implementation in here is soley based on the details described on the following blog):
+There are 2 variations of the rate limiting within the library, depending upon your needs for
+accuracy and/or performance.  The recommended ratelimiter is the *background* ratelimiter (default).
+
+The difference between `background` and `foreground` is that with the `foreground` mode, redis operations occur on the request thread.  This means latency of the redis calls impact the latency of a user's request; however it provides increase accuracy for ratelimiting requests.
+
+The ratelimit is based on the cloudflare ratelimiter as described on this blog (I have no knowledge of the actual implementation details of the cloudflare rate limiter.  The implementation in here is soley based on the details described on the following blog):
 
 - https://blog.cloudflare.com/counting-things-a-lot-of-different-things/
 
@@ -119,6 +122,14 @@ Make sure you check the error log for "`too many pending timers`" or "`lua_max_r
 
 By using background rate limiting, it also means it is possible to allow in a burst of traffic, before the current nginx's shared dict circuit breaker is flipped and traffic is rate limited.  As a result it is possible that more traffic that the allow rate limit is let through in a spike.  Depending upon the response time of redis to process the increment that takes the current requests over the limit, is the window of time that the spike of requests will be allowed through.
 
+# Foreground Ratelimiter
+
+The foreground ratelimit is exactly the same functionality of the `background` ratelimiter.  The only difference being the redis operations work on the request thread.
+This means the latency of redis calls adds to the latency of the user's request.  The more latent that redis is, the more latent that the nginx request will be.
+
+This increase in latency, and coupling, between nginx and redis; does have 1 benefit.  That of increased accuracy.  When the rate limit has been hit the request will be ratelimited.
+With the background rate limiting that request are always let through, and it is only the shared dict that controls when ratelimiting occurs.  With the foreground limiting, the request is rate limited by both the values calculated from redis, and the shared dict
+
 
 # Quick Example
 
@@ -139,12 +150,12 @@ http {
     lua_shared_dict ratelimit_circuit_breaker 10m;
 
     init_by_lua_block {
-        local ratelimit = require "resty.redis.ratelimiter.background"
+        local ratelimit = require "resty.redis.ratelimiter.limiter"
         local red = { host = "127.0.0.1", port = 6379, timeout = 100}
         login, err = ratelimit.new("login", "100r/s", red)
 
         if not login then
-            error("failed to instantiate a resty.redis.ratelimiter.background object")
+            error("failed to instantiate a resty.redis.ratelimiter.limiter object")
         end
     }
 
@@ -198,13 +209,13 @@ Inside a `server` in one of the `/etc/nginx/conf.d/*.conf` includes:
     location /login {
         access_by_lua_block {
 
-            local ratelimit = require "resty.redis.ratelimiter.background"
+            local ratelimit = require "resty.redis.ratelimiter.limiter"
             local red = { host = "127.0.0.1", port = 6379, timeout = 100}
             local lim, err = ratelimit.new("login", "100r/s", red)
 
             if not lim then
                 ngx.log(ngx.ERR,
-                        "failed to instantiate a resty.redis.ratelimiter.background object: ", err)
+                        "failed to instantiate a resty.redis.ratelimiter.limiter object: ", err)
                 return ngx.exit(500)
             end
 
@@ -224,9 +235,9 @@ Inside a `server` in one of the `/etc/nginx/conf.d/*.conf` includes:
 
 ----
 
-## API
+## API Specification
 
-To use the `background` rate limiter there's 3 steps:
+To use the rate `limiter` there's 3 steps:
 
 - Import the module (`require`)
 - Create a rate limiting object, by a zone
@@ -237,12 +248,18 @@ To use the `background` rate limiter there's 3 steps:
 To use any ratelimiter, you need the [resty redis library](https://github.com/openresty/lua-resty-redis).
 
 ```
-local ratelimit = require "resty.redis.ratelimiter.background"
+local ratelimit = require "resty.redis.ratelimiter.limiter"
 ```
 
 ### Create a rate limiting object
 
-The rate limiting objects is the object through which you set up the connection to the redis backend.
+**syntax:**  local lim, err =  ratelimit.new(zone,ratelimit)
+
+**example:** local lim, err =  ratelimit.new("login","1r/m")
+
+Error will be returned if there's an issue constructing the object (memory issues, etc).  The library does not attempt to validate the connection to redis at construction time.  Redis is only contacted during the `is_rate_limited` call.
+
+The rate limiting object is the object through which you set up the connection to the redis backend.
 Each created object can have a different redis backend.  This way you can scale the rate limiting, having different sized redis servers for different
 requirements.
 
@@ -253,14 +270,14 @@ To create a rate limiting `zone` you call `ratelimit.new(zone,ratelimit,[configu
 
 
 ```
-local lim, err = ratelimit.new("login", "100r/s")
-local lim, err = ratelimit.new("topten", "100r/m")
+local login, err = ratelimit.new("login", "100r/s")
+local rec, err = ratelimit.new("recommendations", "100r/m")
 ```
 
 By default, the created object will connect to redis on `localhost` on port `6379`.   To config the redis settings you specify a configuration table:
 
 ```
-{ host = <string|127.0.0.1>, port = <int|6379>, timeout = <millis|100>, connection_pool_size = <conns|100> , idle_keepalive_ms = <millis|10000>,  circuit_breaker_dict_name = <string|ratelimit_circuit_breaker>, expire_after_seconds = <int|window_size_in_seconds * 5>  }
+{ host = <string|127.0.0.1>, port = <int|6379>, timeout = <millis|100>, connection_pool_size = <conns|100> , idle_keepalive_ms = <millis|10000>,  circuit_breaker_dict_name = <string|ratelimit_circuit_breaker>, expire_after_seconds = <int|window_size_in_seconds * 5>, background = <bool|true>  }
 ```
 
 - host : the host name of the redis to connect to
@@ -269,6 +286,7 @@ By default, the created object will connect to redis on `localhost` on port `637
 - idle_keepalive_ms : the max time a connection in the redis pool can be keep open without activity
 - circuit_breaker_dict_name : the shared dict circuit break that performs the rate limiting
 - expire_after_seconds : the expiry time of the key in redis.  Do not change this.
+- background: If the calls to redis occur on the request or not.  By default the redis operations are not performed on the request thread
 
 The connection_pool_size should be configure in accordance with your nginx configuration
 
@@ -278,13 +296,17 @@ Basically if your NGINX handle n concurrent requests and your NGINX has m worker
 
 ### Check if we should rate limit
 
-Rate limiting is done by 
+**syntax:**  <object>.is_rate_limited(rate_limiter_key)
+
+**example:** local rate_limited = login.is_rate_limited(ngx.var.server_name)
+
+Rate limiting is done by calling the `is_rate_limited` function on the ratelimit object, within a `access_by_lua_block`
 
 ```
 access_by_lua_block {
     if login:is_rate_limited(<value you are rate limiting on>) then
         return ngx.exit(429)
-        end
+    end
 }
 
 proxy_pass xxxx
@@ -298,10 +320,43 @@ If redis is not working, then all requests will be allowed through (no rate limi
 
 ```
 2018/05/06 10:54:46 [error] 16#16: *2 connect() failed (111: Connection refused), context: ngx.timer, client: 127.0.0.1, server: 0.0.0.0:9090
-2018/05/06 10:54:46 [error] 16#16: *2 [lua] background.lua:229: |{"level" : "ERROR", "msg" : "failed_connecting_to_redis", "incremented_counter":"false", "key" : "login:127.0.0.1", "host":"127.0.0.1", "port":"6379" }|failed to create redis - connection refused, context: ngx.timer, client: 127.0.0.1, server: 0.0.0.0:9090
+2018/05/06 10:54:46 [error] 16#16: *2 [lua] limiter.lua:229: |{"level" : "ERROR", "msg" : "failed_connecting_to_redis", "incremented_counter":"false", "key" : "login:127.0.0.1", "host":"127.0.0.1", "port":"6379" }|failed to create redis - connection refused, context: ngx.timer, client: 127.0.0.1, server: 0.0.0.0:9090
 ```
 
+----
 
+# Local Testing
+
+There's a `Dockerfile` that can be used to build a local docker image for testing.  Build the image:
+
+```
+docker build --no-cache .
+```
+
+And then run from the root of the repo:
+
+
+```
+docker run --rm -it -v $(pwd)/conf.d:/etc/nginx/conf.d -v $(pwd)/nginx.conf:/usr/local/openresty/nginx/conf/nginx.conf \
+-v $(pwd):/data \
+-v $(pwd)/lib/resty/redis/ratelimiter/limiter.lua:/usr/local/openresty/lualib/resty/redis/ratelimiter/limiter.lua \
+ratelimiter:latest /bin/bash
+```
+
+when in the contain run the `/data/init.sh` to start openresty and a local redis.  OpenResty will be running on port `9090`.
+Gil Tene's fork of [wrk](https://github.com/giltene/wrk2) is also complied during the build of the docker image.
+
+```
+/data/init.sh
+curl localhost:9090/login
+wrk -t1 -c1 -d30s -R2 http://localhost:9090/login
+```
+
+There is a `nginx.config` and a `conf.d/default.config` example in the project for you to work with.  By default there are 3 locations:
+
+/t
+/login
+/login_foreground
 
 ----
 

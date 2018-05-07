@@ -19,7 +19,7 @@ local FAILED_TO_RETURN_CONNECTION = "failed_returning_connection_to_pool"
 local FAILED_TO_SET_KEY_EXPIRY = "failed_set_key_expiry"
 
 local _M = {
-    _VERSION = "0.03",
+    _VERSION = "0.0.1",
 }
 
 local mt = {
@@ -62,6 +62,10 @@ local function _defaults(cfg,window_size_in_seconds)
 
     if cfg['circuit_breaker_dict_name'] == nil then
         cfg['circuit_breaker_dict_name'] = shared_dict_default
+    end
+
+    if cfg['background'] == nil then
+        cfg['background'] = true
     end
 end
 
@@ -109,6 +113,11 @@ end
 local function _redis_create(host, port, timeout_millis, dbid)
 
     local red = redis:new()
+
+    if red == nil then
+        return nil, redis_err("unable to create redis object")
+    end
+
 
     red:set_timeout(timeout_millis)
 
@@ -222,6 +231,7 @@ end
 
 local function increment_limit(premature,cfg,dict_name,
                                key,rate,scale,requesttime)
+    local rate_limited = false
 
     local red, err = _redis_create(cfg.host,cfg.port,
                                    cfg.timeout,cfg.dbid)
@@ -233,7 +243,7 @@ local function increment_limit(premature,cfg,dict_name,
     local start_of_period = get_start_of_period(scale,requesttime)
     local currrent_period_key, previous_period_key = get_keys(scale,key,start_of_period)
 
-    red:init_pipeline(n)
+    red:init_pipeline(2)
     red:incr(currrent_period_key)
     red:get(previous_period_key)
     local results, err = red:commit_pipeline()
@@ -258,22 +268,28 @@ local function increment_limit(premature,cfg,dict_name,
             if current_rate >= rate then
                 ngx.log(ngx.INFO,'|{"level" : "INFO",  "key" : "' .. key .. '" , "msg" : "opening_rate_limit_circuit", "number_of_old_requests" : ' .. old_number_of_requests .. ', "number_of_new_requests" : ' .. new_count .. ', "current_rate" : ' .. current_rate .. ', "rate_limit" : ' .. rate .. ' }|')
                 open_circuit(dict_name,key,scale - elapsed)
+                rate_limited = true
             end
+        end
 
-            -- put it into the connection pool
-            local ok, err = red:set_keepalive(cfg.idle_keepalive_ms, cfg.connection_pool_size)
+        -- put it into the connection pool
+        local ok, err = red:set_keepalive(cfg.idle_keepalive_ms, cfg.connection_pool_size)
+        if not ok then
+            ngx.log(ngx.INFO,'|{"level" : "INFO", "msg" : "failed_returning_connection_to_pool"}|', err)
+            ok, err = red:close()
             if not ok then
-                ngx.log(ngx.INFO,'|{"level" : "INFO", "msg" : "failed_returning_connection_to_pool"}|', err)
+                ngx.log(ngx.INFO,'|{"level" : "INFO", "msg" : "failed_closing_connection"}|',err)
             end
         end
     else
-        ngx.log(ngx.ERR,'|{"level" : "ERROR", "msg" : "increment_rate_limit_timeout",  "incremented_counter" : "false", "key" : "' .. key .. '" }|',err)
+        ngx.log(ngx.ERR,'|{"level" : "ERROR", "msg" : "increment_rate_limit_failure",  "incremented_counter" : "false", "key" : "' .. key .. '" }|',err)
         ok, err = red:close()
         if not ok then
             ngx.log(ngx.INFO,'|{"level" : "INFO", "msg" : "failed_closing_connection"}|',err)
         end
     end
 
+    return rate_limited
 end
 
 
@@ -286,11 +302,18 @@ function _M.is_rate_limited(self, key)
     local scale = self.scale
 
     if circuit_is_closed(dict_name,formatted_key) then
-        local ok, err = ngx.timer.at(0, increment_limit,
-                                     cfg,
-                                     dict_name,formatted_key,
-                                     rate,scale,ngx.req.start_time())
-        return false
+        if cfg.background then
+            local ok, err = ngx.timer.at(0, increment_limit,
+                                        cfg,
+                                        dict_name,formatted_key,
+                                        rate,scale,ngx.req.start_time())
+            if not ok then
+                ngx.log(ngx.ERR,'|{"level" : "ERROR", "msg" : "increment_rate_limit_call_failure"}|',err)
+            end
+            return false
+        else
+            return increment_limit(nil,cfg,dict_name,formatted_key,rate,scale,ngx.req.start_time())
+        end
     end
 
     return true

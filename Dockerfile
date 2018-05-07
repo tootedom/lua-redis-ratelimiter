@@ -8,6 +8,7 @@ RUN yum install -y epel-release \
     && yum install git \
     && yum install -y openssl-devel \
     && yum install -y which \
+    && yum install -y jq \
     && export PERL_MM_USE_DEFAULT=1 \
     && PERL_MM_USE_DEFAULT=1 yum install perl-CPAN perl-Test-Base -y \
     && PERL_MM_USE_DEFAULT=1 yum install perl-List-MoreUtils -y \
@@ -21,8 +22,4 @@ RUN yum install -y epel-release \
     && cp wrk /usr/local/bin \
     && cd .. && rm -rf wrk2
 
-# COPY lib/resty/redis/ratelimit.lua /usr/local/openresty/lualib/resty/redis/ratelimit.lua
-
-# CMD ["/usr/bin/redis-server", "/etc/redis.conf"]
-# CMD ["/usr/local/openresty/bin/openresty"]
 
