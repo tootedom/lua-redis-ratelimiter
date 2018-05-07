@@ -355,7 +355,9 @@ And then run from the root of the repo:
 
 
 ```
-docker run --rm -it -v $(pwd)/conf.d:/etc/nginx/conf.d -v $(pwd)/nginx.conf:/usr/local/openresty/nginx/conf/nginx.conf \
+docker run --name ratelimiter --rm -it \
+-v $(pwd)/conf.d:/etc/nginx/conf.d \
+-v $(pwd)/nginx.conf:/usr/local/openresty/nginx/conf/nginx.conf \
 -v $(pwd):/data \
 -v $(pwd)/lib/resty/greencheek/redis/ratelimiter/limiter.lua:/usr/local/openresty/lualib/resty/greencheek/redis/ratelimiter/limiter.lua \
 ratelimiter:latest /bin/bash
