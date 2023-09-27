@@ -253,10 +253,10 @@ local function increment_limit(premature,cfg,dict_name,
     end
 
     local start_of_period = get_start_of_period(scale,requesttime)
-    local currrent_period_key, previous_period_key = get_keys(scale,key,start_of_period)
+    local current_period_key, previous_period_key = get_keys(scale,key,start_of_period)
 
     red:init_pipeline(2)
-    red:incr(currrent_period_key)
+    red:incr(current_period_key)
     red:get(previous_period_key)
     local results, err = red:commit_pipeline()
 
@@ -264,7 +264,7 @@ local function increment_limit(premature,cfg,dict_name,
         ngx.log(ngx.INFO,'|{"level" : "INFO", "incremented_counter" : "true", "key" : "' .. key .. '"}|')
         local new_count = results[1]
         if new_count == 1 then
-            ngx.timer.at(0, expire,currrent_period_key,scale,cfg)
+            ngx.timer.at(0, expire,current_period_key,scale,cfg)
         else
             local res = results[2]
 
@@ -275,7 +275,7 @@ local function increment_limit(premature,cfg,dict_name,
             local elapsed = requesttime - start_of_period
             local current_rate = old_number_of_requests * ( (scale - elapsed) / scale) + new_count
 
-            ngx.log(ngx.INFO,'|{"level" : "INFO",  "key" : "' .. key .. '", "msg" : "current_rate_report", "previous_period_key" : "' .. previous_period_key  .. '", "current_period_key" : "' .. currrent_period_key .. '", "number_of_old_requests" : ' .. old_number_of_requests .. ', "number_of_new_requests" : ' .. new_count .. ', "elasped_time_in_current_period" : ' .. elapsed .. ' , "current_rate" : ' .. current_rate .. ', "rate_limit" : ' .. rate .. ' }|')
+            ngx.log(ngx.INFO,'|{"level" : "INFO",  "key" : "' .. key .. '", "msg" : "current_rate_report", "previous_period_key" : "' .. previous_period_key  .. '", "current_period_key" : "' .. current_period_key .. '", "number_of_old_requests" : ' .. old_number_of_requests .. ', "number_of_new_requests" : ' .. new_count .. ', "elasped_time_in_current_period" : ' .. elapsed .. ' , "current_rate" : ' .. current_rate .. ', "rate_limit" : ' .. rate .. ' }|')
 
             if current_rate >= rate then
                 ngx.log(ngx.INFO,'|{"level" : "INFO",  "key" : "' .. key .. '" , "msg" : "opening_rate_limit_circuit", "number_of_old_requests" : ' .. old_number_of_requests .. ', "number_of_new_requests" : ' .. new_count .. ', "current_rate" : ' .. current_rate .. ', "rate_limit" : ' .. rate .. ' }|')
